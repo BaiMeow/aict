@@ -80,7 +80,8 @@ func (c *AictConn) readRoutine() error {
 		n, addr, err := c.conn.ReadFrom(buf)
 		if err != nil {
 			// if not init
-			if err, ok := err.(net.Error); ok && c.identify == 0 && err.Timeout() {
+			var netErr net.Error
+			if errors.As(err, &netErr) && c.identify == 0 && netErr.Timeout() {
 				continue
 			}
 			return fmt.Errorf("icmp: read from: %v", err)

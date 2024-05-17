@@ -6,11 +6,11 @@
 
 Another Internet Control Message Tunnel But Featuring Firewall Bypass
 
-## Introduce
+## 简介
 
 AICT是一个使用 ICMP 包绕过防火墙和 NAT 的工具，他最初作为紧急运维一些位于学校网络中的服务器的一个 fallback 策略开发的。
 
-早先他是一个[gost](https://github.com/go-gost/gost)插件，但是感觉还是被gost限制了，所以现在是一个独立的工具。
+早先他是一个[gost](https://github.com/go-gost/gost)插件，但是感觉写着不太爽，所以现在是一个独立的工具。
 
 ## 原理
 
@@ -22,7 +22,7 @@ AICT 为了在这个限制下建立 icmp 隧道，它在服务器端维护了一
 
 ## 使用
 
-需要先关闭 linux 的 icmp reply
+服务端这边需要先关闭 linux 的 icmp reply
 
 ```bash
 echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_all
@@ -37,3 +37,5 @@ echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_all
 ```bash
 ./aict -s
 ```
+
+如果在 windows 上使用，且开启了tun模式，需要 wintun.dll，可以在[这里](https://www.wintun.net/)下载，放在同个文件夹下。

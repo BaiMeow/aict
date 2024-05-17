@@ -7,6 +7,7 @@ import (
 	"github.com/BaiMeow/aict/server"
 	"log"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,9 @@ var (
 	local        string
 	remote       string
 	pipe         string
+	MTU          int
+	address      string
+	routes       string
 )
 
 func main() {
@@ -29,8 +33,11 @@ func main() {
 	flag.BoolVar(&serverMode, "s", false, "run as server")
 	flag.StringVar(&local, "l", "0.0.0.0", "listen addr")
 	flag.StringVar(&remote, "r", "0.0.0.0", "remote addr")
-	flag.IntVar(&seqQueueSize, "seqQueueSize", 10, "size of sequence queue (server)")
+	flag.IntVar(&seqQueueSize, "seqQueueSize", 10, "[server mode] size of sequence queue")
 	flag.StringVar(&pipe, "p", "tun", "pipe packet, example (udp:12345,tun:tun0)")
+	flag.IntVar(&MTU, "mtu", 1280, "[tun] mtu of tun device")
+	flag.StringVar(&address, "addr", "", "[tun] interface address must be in CIDR format")
+	flag.StringVar(&routes, "routes", "", "[tun] routes,example (1.1.1.1/32,2.2.2.0/30)")
 	flag.Parse()
 
 	localAddr := net.ParseIP(local)
@@ -60,7 +67,30 @@ func main() {
 		log.Fatalln("args conflict, unknown running mode")
 	}
 
-	// for test
+	arr := strings.SplitN(strings.TrimSpace(pipe), ":", 2)
+	var pipeProto string
+	var pipeArg string
+	if len(arr) < 1 {
+		log.Fatalln("parse arg pipe failed")
+	}
+	pipeProto = arr[0]
+	if len(arr) == 2 {
+		pipeArg = arr[1]
+	}
+
+	switch pipeProto {
+	case "tun":
+		tunUp(conn, pipeArg)
+	case "udp":
+		panic("not implemented")
+	case "test":
+		test(conn)
+	default:
+		log.Fatalf("unknown pipe proto: %s", pipeProto)
+	}
+}
+
+func test(conn Conn) {
 	go func() {
 		for {
 			data, err := conn.ReadPacket()

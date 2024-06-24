@@ -1,50 +1,97 @@
 package ds
 
 import (
-	"sync"
+	"sync/atomic"
 )
 
-type RotatedQueue[T any] struct {
-	buf         []T
-	len         uint64
+type status struct {
 	readCursor  uint64
+	readLen     uint64
 	writeCursor uint64
-	lock        sync.Mutex
-	wait        chan struct{}
+	writingLen  uint64
+}
+
+type RotatedQueue[T any] struct {
+	buf    []T
+	len    uint64
+	cursor atomic.Value
 }
 
 // NewRotatedQueue len must be pow of 2
 func NewRotatedQueue[T any](size int) *RotatedQueue[T] {
-	return &RotatedQueue[T]{
-		buf:  make([]T, size),
-		len:  uint64(size),
-		wait: make(chan struct{}),
+	q := &RotatedQueue[T]{
+		buf:    make([]T, size),
+		len:    uint64(size),
+		cursor: atomic.Value{},
 	}
+	q.cursor.Store(status{0, 0, 0, 0})
+	return q
 }
 
+// Push Must be called by only one writer
 func (q *RotatedQueue[T]) Push(v T) {
-	q.lock.Lock()
-	if q.readCursor%q.len == (q.writeCursor+1)%q.len {
-		q.readCursor++
+Alloc:
+	// alloc spare space
+	old := q.cursor.Load().(status)
+	var n status
+	if old.readLen+old.writingLen == q.len {
+		// full
+		if old.readLen == 0 && old.writingLen == q.len {
+			// impossible in single writer
+			goto Alloc
+		}
+		n = status{
+			// eat one element
+			readCursor:  (old.readCursor + 1) % q.len,
+			readLen:     old.readLen - 1,
+			writeCursor: old.writeCursor,
+			writingLen:  old.writingLen + 1,
+		}
+	} else {
+		// not full
+		n = status{
+			readCursor:  old.readCursor,
+			readLen:     old.readLen,
+			writeCursor: old.writeCursor,
+			writingLen:  old.writingLen + 1,
+		}
 	}
-	q.writeCursor++
-	q.buf[q.writeCursor%q.len] = v
-	select {
-	case q.wait <- struct{}{}:
-	default:
+	if !q.cursor.CompareAndSwap(old, n) {
+		goto Alloc
 	}
-	q.lock.Unlock()
+
+	// fill data
+	q.buf[n.writeCursor] = v
+
+LengthPlus1:
+	old = q.cursor.Load().(status)
+	if !q.cursor.CompareAndSwap(old, status{
+		readCursor:  old.readCursor,
+		readLen:     old.readLen + 1,
+		writeCursor: (old.writeCursor + 1) % q.len,
+		writingLen:  old.writingLen - 1,
+	}) {
+		goto LengthPlus1
+	}
 }
 
 func (q *RotatedQueue[T]) Pop() T {
-	q.lock.Lock()
-	if q.readCursor%q.len == q.writeCursor%q.len {
-		q.lock.Unlock()
-		<-q.wait
-		q.lock.Lock()
+Read:
+	old := q.cursor.Load().(status)
+	if old.readLen == 0 {
+		// empty
+		goto Read
 	}
-	v := q.buf[q.readCursor%q.len]
-	q.readCursor++
-	q.lock.Unlock()
-	return v
+
+	data := q.buf[old.readCursor]
+	if !q.cursor.CompareAndSwap(old, status{
+		readCursor:  (old.readCursor + 1) % q.len,
+		readLen:     old.readLen - 1,
+		writeCursor: old.writeCursor,
+		writingLen:  old.writingLen,
+	}) {
+		goto Read
+	}
+
+	return data
 }

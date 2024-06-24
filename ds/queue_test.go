@@ -1,9 +1,9 @@
 package ds
 
 import (
+	"context"
 	"fmt"
 	"testing"
-	"time"
 )
 
 func TestQueue(t *testing.T) {
@@ -12,26 +12,28 @@ func TestQueue(t *testing.T) {
 		q.Push(i)
 	}
 	for i := 0; i < 2; i++ {
-		fmt.Println(q.buf, q.writeCursor, q.readCursor)
+		fmt.Println(q.buf, q.cursor)
 		fmt.Println(q.Pop())
 	}
 	for i := 10; i < 20; i++ {
 		q.Push(i)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(time.Millisecond * 1000)
-		q.Push(20)
-		q.Push(21)
-		q.Push(22)
-	}()
-	go func() {
+		i := 20
 		for {
-			i := 1
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			q.Push(i)
 			i++
 		}
 	}()
-	for i := 0; i < 6; i++ {
-		fmt.Println(q.buf, q.writeCursor, q.readCursor)
+	for i := 0; i < 600; i++ {
+		fmt.Println(q.buf, q.cursor)
 		fmt.Println(q.Pop())
 	}
+	cancel()
 }

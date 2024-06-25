@@ -26,7 +26,7 @@ type AictConn struct {
 
 	raddr             *net.IPAddr
 	identify          uint16
-	sequenceQueue     *ds.RotatedQueue[uint16]
+	sequenceQueue     *ds.RotatedQueue[proto.IdSeqPair]
 	sequenceQueueSize int
 }
 
@@ -41,7 +41,7 @@ func newAict(c net.PacketConn, raddr *net.IPAddr, cfg *Config) *AictConn {
 		cancel:            cancel,
 		raddr:             raddr,
 		sequenceQueueSize: cfg.SeqQueueSize,
-		sequenceQueue:     ds.NewRotatedQueue[uint16](cfg.SeqQueueSize),
+		sequenceQueue:     ds.NewRotatedQueue[proto.IdSeqPair](cfg.SeqQueueSize),
 	}
 	go func() {
 		err := aict.readRoutine()
@@ -110,19 +110,16 @@ func (c *AictConn) readRoutine() error {
 		// do init
 		if c.identify == 0 && (c.raddr.IP.Equal(net.IP{0, 0, 0, 0}) || c.raddr.IP.Equal(ipaddr.IP)) {
 			c.identify = uint16(echo.ID)
-			c.sequenceQueue = ds.NewRotatedQueue[uint16](c.sequenceQueueSize)
+			c.sequenceQueue = ds.NewRotatedQueue[proto.IdSeqPair](c.sequenceQueueSize)
 			c.raddr = ipaddr
 			close(c.initialized)
 			log.Println("accept connection from " + c.raddr.String())
 		}
 
-		//if msg.Flags&proto.FlagPing > 0 {
-		//	// todo: may block read loop
-		//	c.writeBuffer <- msg.Payload
-		//	continue
-		//}
-
-		c.sequenceQueue.Push(uint16(echo.Seq))
+		c.sequenceQueue.Push(proto.IdSeqPair{
+			Id:  uint16(echo.ID),
+			Seq: uint16(echo.Seq),
+		})
 
 		if msg.Flags&proto.FlagKeepalive > 0 {
 			continue
@@ -154,12 +151,13 @@ func (c *AictConn) writeRoutine() (err error) {
 			if err != nil {
 				log.Printf("marshal msg: %v\n", err)
 			}
+			pair := c.sequenceQueue.Pop()
 			message := icmp.Message{
 				Type: ipv4.ICMPTypeEchoReply,
 				Code: 0,
 				Body: &icmp.Echo{
-					ID:   int(c.identify),
-					Seq:  int(c.sequenceQueue.Pop()),
+					ID:   int(pair.Id),
+					Seq:  int(pair.Seq),
 					Data: data,
 				},
 			}

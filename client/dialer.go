@@ -27,7 +27,7 @@ func Dial(laddr *net.IPAddr, raddr *net.IPAddr, cfg *Config) (*AictConn, error) 
 		cfg.minAirSeqCount = 1
 	}
 	if cfg.maxAirSeqCount == 0 {
-		cfg.maxAirSeqCount = 16
+		cfg.maxAirSeqCount = 32
 	}
 
 	return newAict(conn, raddr, cfg), nil

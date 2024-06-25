@@ -7,6 +7,7 @@ import (
 	"github.com/BaiMeow/aict/proto"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/time/rate"
 	"log"
 	"math"
 	"net"
@@ -15,45 +16,49 @@ import (
 )
 
 const (
-	bufferSize     = 1500
+	bufferSize     = 1700
 	bufferQueueLen = 1024
 	boostPeriod    = 500 * time.Millisecond
+	RTT            = 10 * time.Millisecond
 )
 
 type AictConn struct {
-	conn        net.PacketConn
-	raddr       *net.IPAddr
-	identify    int
-	readBuffer  chan []byte
-	writeBuffer chan []byte
-	// sequence is uint16 but only uint32 has atomic operation
-	sequence     uint32
-	peerSequence uint32
+	conn         net.PacketConn
+	raddr        *net.IPAddr
+	identify     int
+	readBuffer   chan []byte
+	writeBuffer  chan []byte
+	sequence     atomic.Uint32
+	peerSequence atomic.Uint32
+	readCounter  atomic.Uint32
 	cancel       context.CancelFunc
 	ctx          context.Context
 
-	airSequenceN    int
-	minAirSequenceN int
-	maxAirSequenceN int
+	peerQueueSize    int
+	sentSequenceN    int
+	minSentSequenceN int
+	maxSentSequenceN int
 
-	sequenceTicker *time.Ticker
-	readCounter    atomic.Uint32
+	sendLimiter *rate.Limiter
+
+	sequenceTimer *time.Timer
 }
 
 func newAict(conn net.PacketConn, raddr *net.IPAddr, cfg *Config) *AictConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &AictConn{
-		conn:            conn,
-		raddr:           raddr,
-		identify:        cfg.Identify,
-		cancel:          cancel,
-		readBuffer:      make(chan []byte, bufferQueueLen),
-		writeBuffer:     make(chan []byte, bufferQueueLen),
-		ctx:             ctx,
-		airSequenceN:    cfg.minAirSeqCount,
-		minAirSequenceN: cfg.minAirSeqCount,
-		maxAirSequenceN: cfg.maxAirSeqCount,
-		sequenceTicker:  time.NewTicker(boostPeriod / time.Duration(cfg.minAirSeqCount)),
+		conn:             conn,
+		raddr:            raddr,
+		identify:         cfg.Identify,
+		cancel:           cancel,
+		readBuffer:       make(chan []byte, bufferQueueLen),
+		writeBuffer:      make(chan []byte, bufferQueueLen),
+		ctx:              ctx,
+		sentSequenceN:    cfg.minAirSeqCount,
+		minSentSequenceN: cfg.minAirSeqCount,
+		maxSentSequenceN: cfg.maxAirSeqCount,
+		sequenceTimer:    time.NewTimer(boostPeriod / time.Duration(cfg.minAirSeqCount)),
+		sendLimiter:      rate.NewLimiter(rate.Every(RTT), 1),
 	}
 	go func() {
 		err := c.readRoutine()
@@ -97,19 +102,23 @@ func (c *AictConn) booster() {
 			return
 		case <-tBoost.C:
 			count := c.readCounter.Swap(0)
+			//cost := max(uint32(c.sentSequenceN)-(c.sequence.Load()-c.peerSequence.Load()), 1)
 			// ensure fold [0,1]
-			fold := min(float64(count)/float64(c.airSequenceN), 1)
-			calc := math.Round((math.Pow(fold, 1.6)-0.5)*float64(c.airSequenceN) + float64(c.airSequenceN))
-			calc = min(max(calc, float64(c.minAirSequenceN)), float64(c.maxAirSequenceN))
-			// log.Printf("icmp: air seq count %d", int(calc))
-			c.airSequenceN = int(calc)
-			c.cancelSeqOnce()
+			//calc := float64(cost) / 0.6
+			calc := float64(count)/0.6*0.5 + float64(c.sentSequenceN)*0.5
+			calc = min(max(calc, float64(c.minSentSequenceN)), float64(c.maxSentSequenceN))
+			log.Printf("icmp: air seq count %d", int(calc))
+			c.sentSequenceN = int(calc)
+			c.sequenceTimer.Stop()
+			// notify write routine to reset timer
+			c.sequenceTimer.Reset(1)
 		}
 	}
 }
 
 func (c *AictConn) cancelSeqOnce() {
-	c.sequenceTicker.Reset(boostPeriod / time.Duration(c.airSequenceN))
+	c.sequenceTimer.Stop()
+	c.sequenceTimer.Reset(boostPeriod / time.Duration(c.sentSequenceN))
 }
 
 func (c *AictConn) readRoutine() error {
@@ -160,10 +169,20 @@ func (c *AictConn) readRoutine() error {
 			continue
 		}
 
+		seq := uint16(uint32(echo.Seq) & 0xffff)
+
 		c.readCounter.Add(1)
+	UpdatePeerSeq:
+		old := c.peerSequence.Load()
+		if seq-uint16(old) < math.MaxUint16/2 {
+			if !c.peerSequence.CompareAndSwap(old, uint32(seq)) {
+				goto UpdatePeerSeq
+			}
+		}
 
 		msg := &proto.Layer{}
 		if err := msg.Unmarshal(echo.Data); err != nil {
+			fmt.Println("unmarshal error: ", err)
 			// skip
 			continue
 		}
@@ -182,12 +201,19 @@ func (c *AictConn) writeRoutine() error {
 		}
 		select {
 		case <-c.ctx.Done():
-			c.sequenceTicker.Stop()
+			c.sequenceTimer.Stop()
 			return nil
 		case aictLayer.Payload = <-c.writeBuffer:
 			c.cancelSeqOnce()
-		case <-c.sequenceTicker.C:
+		case <-c.sequenceTimer.C:
+			c.sequenceTimer.Reset(boostPeriod / time.Duration(c.sentSequenceN))
 			aictLayer.Flags = proto.FlagKeepalive
+		}
+
+		// rate limit
+		err := c.sendLimiter.Wait(c.ctx)
+		if err != nil {
+			return fmt.Errorf("rate limit: %v", err)
 		}
 
 		data, err := aictLayer.Marshal()
@@ -200,7 +226,7 @@ func (c *AictConn) writeRoutine() error {
 			Code: 0,
 			Body: &icmp.Echo{
 				ID:   c.identify,
-				Seq:  int(uint16(atomic.AddUint32(&c.sequence, 1))),
+				Seq:  int(uint16(c.sequence.Add(1))),
 				Data: data,
 			},
 		}
@@ -216,6 +242,7 @@ func (c *AictConn) writeRoutine() error {
 }
 
 func (c *AictConn) WritePacket(data []byte) error {
+
 	select {
 	case <-c.ctx.Done():
 		return errors.New("connection closed")
